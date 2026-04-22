@@ -1,43 +1,47 @@
 import axios from "axios";
-import { useAuthStore } from "../stores/authStore";
 
 /* ---------------------------------------
-   Cookie helpers
+   Cookie helper
 ---------------------------------------- */
 const getCookie = (name) => {
   if (typeof document === "undefined") return null;
-  const match = document.cookie.match(new RegExp("(^| )" + name + "=([^;]+)"));
+
+  const match = document.cookie.match(
+    new RegExp("(^| )" + name + "=([^;]+)")
+  );
+
   return match ? decodeURIComponent(match[2]) : null;
 };
 
-const getAllCookies = () => {
-  if (typeof document === "undefined") return {};
-  return document.cookie.split("; ").reduce((acc, cookie) => {
-    const [name, value] = cookie.split("=");
-    acc[name] = decodeURIComponent(value);
-    return acc;
-  }, {});
+/* ---------------------------------------
+   Token sanitizer — strips accidental "Bearer " prefix
+---------------------------------------- */
+const sanitizeToken = (token) => {
+  if (!token) return null;
+  const stripped = token.startsWith("Bearer ") ? token.slice(7) : token;
+  return stripped.trim();
 };
 
 /* ---------------------------------------
-   XSRF Token Cache
+   Cookie setter — always stores raw token
 ---------------------------------------- */
-let cachedXsrfToken = null;
-let lastCookieCheck = 0;
-const CACHE_DURATION = 50;
+const setAuthCookies = (accessToken, refreshToken) => {
+  const rawAccess = sanitizeToken(accessToken);
+  const rawRefresh = sanitizeToken(refreshToken);
 
-const getLatestXsrfToken = () => {
-  const now = Date.now();
-  if (now - lastCookieCheck > CACHE_DURATION) {
-    cachedXsrfToken = getCookie("XSRF-TOKEN");
-    lastCookieCheck = now;
+  if (rawAccess) {
+    document.cookie = `accessToken=${rawAccess}; path=/; SameSite=Strict`;
   }
-  return cachedXsrfToken;
+  if (rawRefresh) {
+    document.cookie = `refreshToken=${rawRefresh}; path=/; SameSite=Strict`;
+  }
 };
 
-const refreshXsrfCache = () => {
-  cachedXsrfToken = getCookie("XSRF-TOKEN");
-  lastCookieCheck = Date.now();
+const clearAuthCookies = () => {
+  document.cookie =
+    "accessToken=; path=/; expires=Thu, 01 Jan 1970 00:00:00 UTC; SameSite=Strict";
+  document.cookie =
+    "refreshToken=; path=/; expires=Thu, 01 Jan 1970 00:00:00 UTC; SameSite=Strict";
 };
 
 /* ---------------------------------------
@@ -49,7 +53,7 @@ const axiosClient = axios.create({
 });
 
 /* ---------------------------------------
-   Refresh Token Handling
+   Refresh handling
 ---------------------------------------- */
 let isRefreshing = false;
 let failedQueue = [];
@@ -74,21 +78,11 @@ const AUTH_EXCLUDED_PATHS = [
 ---------------------------------------- */
 axiosClient.interceptors.request.use(
   (config) => {
-    if (typeof document === "undefined") return config;
+    const raw = getCookie("accessToken");
+    const accessToken = sanitizeToken(raw);
 
-    const method = config.method?.toUpperCase();
-    const unsafeMethods = ["POST", "PUT", "PATCH", "DELETE"];
-
-    // ❗ Do NOT attach CSRF token for login & auth endpoints
-    if (AUTH_EXCLUDED_PATHS.some((p) => config.url?.includes(p))) {
-      return config;
-    }
-
-    if (unsafeMethods.includes(method)) {
-      const xsrfToken = getLatestXsrfToken();
-      if (xsrfToken) {
-        config.headers["X-XSRF-TOKEN"] = xsrfToken;
-      }
+    if (accessToken) {
+      config.headers["Authorization"] = `Bearer ${accessToken}`;
     }
 
     return config;
@@ -100,10 +94,7 @@ axiosClient.interceptors.request.use(
    Response Interceptor
 ---------------------------------------- */
 axiosClient.interceptors.response.use(
-  (response) => {
-    refreshXsrfCache();
-    return response;
-  },
+  (response) => response,
   async (error) => {
     const originalRequest = error.config;
 
@@ -116,25 +107,11 @@ axiosClient.interceptors.response.use(
       requestUrl.includes(p)
     );
 
-    // ❌ NEVER retry CSRF or refresh on auth endpoints
     if (isAuthEndpoint) {
       return Promise.reject(error);
     }
 
-    /* ---- 403 CSRF retry ---- */
-    if (error.response.status === 403 && !originalRequest._csrfRetry) {
-      originalRequest._csrfRetry = true;
-      await new Promise((r) => setTimeout(r, 150));
-      refreshXsrfCache();
-
-      const fresh = getLatestXsrfToken();
-      if (fresh && fresh !== originalRequest.headers["X-XSRF-TOKEN"]) {
-        originalRequest.headers["X-XSRF-TOKEN"] = fresh;
-        return axiosClient(originalRequest);
-      }
-    }
-
-    /* ---- 401 refresh flow ---- */
+    /* ---- 401 REFRESH FLOW ---- */
     if (error.response.status === 401 && !originalRequest._retry) {
       originalRequest._retry = true;
 
@@ -147,29 +124,31 @@ axiosClient.interceptors.response.use(
       isRefreshing = true;
 
       try {
-        refreshXsrfCache();
-        const xsrfToken = getLatestXsrfToken();
+        const raw = getCookie("refreshToken");
+        const refreshToken = sanitizeToken(raw);
 
-        const refreshConfig = { withCredentials: true };
-        if (xsrfToken) {
-          refreshConfig.headers = { "X-XSRF-TOKEN": xsrfToken };
-        }
-
-        await axios.post(
+        const { data } = await axios.post(
           `${process.env.NEXT_PUBLIC_API_BASE_URL}/auth/refresh-token`,
           {},
-          refreshConfig
+          {
+            withCredentials: true,
+            headers: refreshToken
+              ? { Authorization: `Bearer ${refreshToken}` }
+              : {},
+          }
         );
 
-        await new Promise((r) => setTimeout(r, 150));
-        refreshXsrfCache();
+        setAuthCookies(data.accessToken, data.refreshToken);
+
         processQueue(null);
 
         return axiosClient(originalRequest);
       } catch (e) {
         processQueue(e);
-        useAuthStore.getState().clearUser();
+        clearAuthCookies();
+
         if (typeof window !== "undefined") window.location.href = "/login";
+
         return Promise.reject(e);
       } finally {
         isRefreshing = false;

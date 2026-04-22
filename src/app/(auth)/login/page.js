@@ -39,7 +39,11 @@ export default function LoginPage() {
 
       if (availableClubs && availableClubs.length > 0) {
         const defaultClubId = availableClubs[0].clubId;
-        const user = await authService.selectClub(userId, defaultClubId);
+        const { user, accessToken, refreshToken } =
+          await authService.selectClub(userId, defaultClubId);
+        document.cookie = `accessToken=${accessToken}; path=/; SameSite=Strict`;
+        document.cookie = `refreshToken=${refreshToken}; path=/; SameSite=Strict`;
+
         routeByRoles(user.roles);
       } else {
         routeByRoles(roles);
@@ -50,7 +54,7 @@ export default function LoginPage() {
           setError("Invalid email or password.");
           break;
         case "CLUB_ACCESS_RESTRICTED":
-          setError("You don’t have access to this club.");
+          setError("You don't have access to this club.");
           break;
         case "ACCOUNT_BLOCKED":
           setError("Your account has been blocked.");
@@ -58,6 +62,7 @@ export default function LoginPage() {
         default:
           setError("Something went wrong. Please try again later.");
       }
+    } finally {
       setLoading(false);
     }
   };

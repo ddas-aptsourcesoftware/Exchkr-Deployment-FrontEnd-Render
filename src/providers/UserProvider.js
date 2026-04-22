@@ -3,6 +3,7 @@
 import { useEffect, useState } from "react";
 import { useRouter } from "next/navigation";
 import { useAuthStore } from "@/stores/authStore";
+import axiosClient from "@/services/axiosClient";
 
 export default function UserProvider({ children }) {
   const router = useRouter();
@@ -12,23 +13,18 @@ export default function UserProvider({ children }) {
   useEffect(() => {
     const fetchUser = async () => {
       try {
-        const res = await fetch(
-          `${process.env.NEXT_PUBLIC_API_BASE_URL}/api/user-data`,
-          { credentials: "include" }
-        );
+        const res = await axiosClient.get("/api/user-data");
 
-        if (res.status === 401) {
+        if (res.status === 200 && res.data) {
+          setUser(res.data);
+        }
+      } catch (err) {
+        if (err.response?.status === 401) {
           setUser(null);
           router.replace("/login");
-          return;
+        } else {
+          console.error("User fetch failed (network / cold start)");
         }
-
-        if (res.ok) {
-          const data = await res.json();
-          if (data) setUser(data);
-        }
-      } catch {
-        console.error("User fetch failed (network / cold start)");
       } finally {
         setLoading(false);
       }
@@ -42,7 +38,6 @@ export default function UserProvider({ children }) {
 
   return children;
 }
-
 
 /*
 This provider fetches the logged-in user on app load, stores it in the auth store,
